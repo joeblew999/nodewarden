@@ -72,6 +72,8 @@ export BW_CLIENTID BW_CLIENTSECRET
 bw login --apikey 2>&1 | tail -3
 
 echo "→ unlocking vault → BW_SESSION"
+# bw --passwordenv requires the env var to be exported, not just shell-local
+export BW_PASSWORD
 BW_SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
 unset BW_PASSWORD
 
@@ -83,23 +85,34 @@ printf '%s' "$BW_CLIENTSECRET" | "$FNOX" set --global -p keychain BW_CLIENTSECRE
 printf '%s' "$BW_SESSION"      | "$FNOX" set --global -p keychain BW_SESSION
 
 echo "→ adding bitwarden provider to $FNOX_CONFIG"
+# fnox's bitwarden provider does NOT accept a 'server' field — the URL is set
+# on the bw CLI side via 'bw config server' (done above). fnox just shells out
+# to 'bw' which reads its own config. Valid fields per fnox docs: collection,
+# organization_id, profile, backend, auth_command.
 mkdir -p "$(dirname "$FNOX_CONFIG")"
 touch "$FNOX_CONFIG"
 if grep -q '^\[providers\.bitwarden\]' "$FNOX_CONFIG"; then
   echo "  ✓ already present"
 else
-  printf '\n[providers.bitwarden]\ntype = "bitwarden"\nserver = "%s"\n' "$URL" >> "$FNOX_CONFIG"
+  printf '\n[providers.bitwarden]\ntype = "bitwarden"\n' >> "$FNOX_CONFIG"
   echo "  ✓ appended"
 fi
 
 unset BW_CLIENTID BW_CLIENTSECRET BW_SESSION
 
 echo
-echo "=== verify ==="
-bw status 2>&1 | jq -r '"  status:    \(.status)\n  serverUrl: \(.serverUrl)\n  userEmail: \(.userEmail // "?")"'
+echo "=== verify (bw status with stored BW_SESSION exported) ==="
+SESSION=$("$FNOX" get BW_SESSION)
+BW_SESSION="$SESSION" bw status 2>&1 \
+  | jq -r '"  status:    \(.status)\n  serverUrl: \(.serverUrl)\n  userEmail: \(.userEmail // "?")"' \
+  || echo "  (bw status check skipped — non-fatal)"
+unset SESSION
 echo
 echo "=== fnox state ==="
-"$FNOX" list 2>&1 | grep -E 'BW_|bitwarden' | head -10
+for k in BW_CLIENTID BW_CLIENTSECRET BW_SESSION; do
+  V=$("$FNOX" get "$k" 2>/dev/null || true)
+  [ -n "$V" ] && echo "  ✓ $k (${#V} chars)" || echo "  ✗ $k missing"
+done
 echo
 echo "============================================================"
 echo "✓ bootstrap complete"
