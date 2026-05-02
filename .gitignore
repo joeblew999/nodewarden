@@ -44,3 +44,6 @@ tmp/
 nodewarden.wiki/
 AGENTS.md
 settings.json
+
+# fnox local config — secrets are managed via global ~/.config/fnox/config.toml
+fnox.toml
