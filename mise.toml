@@ -1,0 +1,110 @@
+# nodewarden — operator deploy tooling.
+#
+# Bitwarden-compatible self-hosted server (fork of shuaiplus/nodewarden).
+# Heavy lifting lives in the shared joeblew999/.github/mise-tasks library.
+# This file only adds:
+#   - tools pin
+#   - phased deploy orchestrators (1-install, 6-build, 10-deploy)
+#   - prove:* health checks specific to nodewarden
+#
+# Deploy lifecycle (fresh machine):
+#   1. fnox set --global -p keychain CLOUDFLARE_API_TOKEN   # one-time per machine
+#      fnox set --global -p keychain CLOUDFLARE_ACCOUNT_ID
+#   2. mise install                                          # node + wrangler
+#   3. mise run 1-install                                    # npm deps
+#   4. mise run cf:provision-d1-r2                           # creates D1 + R2 (idempotent)
+#   5. mise run d1:migrate                                   # apply migrations/0001_init.sql
+#   6. mise run jwt:set                                      # generate + push JWT_SECRET
+#   7. mise run 10-deploy                                    # build + deploy
+#   8. (manual) open URL → register account → generate API key in Settings
+
+[task_config]
+# Shared joeblew999 task library — pinned to same tag as sibling repos (saasmail).
+includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.8.3"]
+
+[tools]
+node              = "lts"
+"npm:wrangler"    = "latest"
+"github:jdx/fnox" = "1.23"
+"aqua:cli/cli"    = "2"
+"aqua:jqlang/jq"  = "1"
+
+[env]
+DEFAULT_ENV    = "production"
+FNOX_SYNC_KEYS = ""        # nothing to sync to GHA — Worker secret managed via wrangler
+
+# ── Per-fork inline tasks (everything else comes from shared) ──────────────
+
+[tasks."1-install"]
+description = "Install npm deps (first time)."
+run         = "npm install"
+
+[tasks."6-build"]
+description = "Build the Vite SPA web vault (dist/)."
+depends     = ["1-install"]
+run         = "npm run build"
+
+[tasks."10-deploy"]
+description = "Build + deploy the Worker. Validates CF token first."
+depends     = ["cf:token-check", "6-build"]
+run         = "wrangler deploy"
+
+[tasks."10b-redeploy"]
+description = "Re-deploy without rebuilding (fast iteration after wrangler.toml/secret changes)."
+run         = "wrangler deploy"
+
+[tasks."dev"]
+description = "Run nodewarden locally (wrangler dev with R2 mode)."
+run         = "npm run dev"
+
+[tasks."tail"]
+description = "Follow live worker logs."
+run         = "wrangler tail"
+
+# ── Bootstrap tasks (run once per environment) ─────────────────────────────
+
+[tasks."d1:migrate"]
+description = "Apply migrations/0001_init.sql to the remote D1 database (idempotent: re-running on a populated DB will error harmlessly)."
+run         = "wrangler d1 execute nodewarden-db --remote --file migrations/0001_init.sql"
+
+[tasks."jwt:set"]
+description = "Generate a 64-char random JWT_SECRET, store in fnox keychain (NODEWARDEN_JWT_SECRET) AND push to wrangler as Worker secret. Idempotent: replaces both."
+run = '''
+SECRET=$(openssl rand -base64 48)
+printf '%s' "$SECRET" | fnox set --global -p keychain NODEWARDEN_JWT_SECRET
+printf '%s' "$SECRET" | wrangler secret put JWT_SECRET
+unset SECRET
+echo "✓ JWT_SECRET stored in fnox + wrangler"
+echo "  Back up offline:  fnox get NODEWARDEN_JWT_SECRET | pbcopy  →  paste into iCloud Notes / paper"
+'''
+
+# ── Prove tasks (verify deployed state) ────────────────────────────────────
+
+[tasks."prove:deployed"]
+description = "HTTP smoke test: GET /alive on the deployed Worker."
+run = '''
+URL=$(wrangler deployments list --json 2>/dev/null | jq -r '.[0].url' 2>/dev/null || echo "")
+[ -z "$URL" ] && URL="https://nodewarden.gedw99.workers.dev"
+echo "→ $URL/alive"
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/alive")
+[ "$CODE" = "200" ] && echo "  ✓ HTTP 200" || { echo "  ✗ HTTP $CODE"; exit 1; }
+'''
+
+[tasks."prove:bindings"]
+description = "Confirm wrangler sees D1, R2, and DurableObject bindings on the deployed Worker."
+run = '''
+wrangler deployments list --json 2>/dev/null | jq -r '.[0].bindings[] | "  ✓ \(.type)\t\(.name // .binding)"' \
+  || echo "✗ no deployment found — run mise run 10-deploy"
+'''
+
+[tasks."prove:secrets"]
+description = "Confirm JWT_SECRET is set on the Worker."
+run = '''
+wrangler secret list 2>/dev/null | grep -q '"name": "JWT_SECRET"' \
+  && echo "  ✓ JWT_SECRET set on Worker" \
+  || { echo "  ✗ JWT_SECRET missing — run mise run jwt:set"; exit 1; }
+'''
+
+[tasks."prove:all"]
+description = "Run all prove:* checks (deployed + bindings + secrets)."
+depends     = ["prove:deployed", "prove:bindings", "prove:secrets"]
