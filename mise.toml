@@ -1,31 +1,35 @@
 # nodewarden — operator deploy tooling.
 #
 # Bitwarden-compatible self-hosted server (fork of shuaiplus/nodewarden).
-# Heavy lifting lives in the shared joeblew999/.github/mise-tasks library.
+# Heavy lifting lives in the shared joeblew999/.github/mise-tasks library
+# (including the bw:* keychain↔NodeWarden hybrid sync tasks added in v0.9.0).
 # This file only adds:
-#   - tools pin
+#   - tools pin (incl. @bitwarden/cli for bw:* tasks)
 #   - phased deploy orchestrators (1-install, 6-build, 10-deploy)
+#   - d1:migrate + jwt:set bootstrap helpers
 #   - prove:* health checks specific to nodewarden
 #
 # Deploy lifecycle (fresh machine):
 #   1. fnox set --global -p keychain CLOUDFLARE_API_TOKEN   # one-time per machine
 #      fnox set --global -p keychain CLOUDFLARE_ACCOUNT_ID
-#   2. mise install                                          # node + wrangler
+#   2. mise install                                          # node + wrangler + bw + fnox
 #   3. mise run 1-install                                    # npm deps
 #   4. mise run cf:provision-d1-r2                           # creates D1 + R2 (idempotent)
 #   5. mise run d1:migrate                                   # apply migrations/0001_init.sql
 #   6. mise run jwt:set                                      # generate + push JWT_SECRET
 #   7. mise run 10-deploy                                    # build + deploy
 #   8. (manual) open URL → register account → generate API key in Settings
+#   9. mise run bw:bootstrap                                 # wire bw CLI ↔ fnox (3 hidden prompts)
+#   10. mise run bw:migrate-from-keychain                    # push existing keychain → NodeWarden
 
 [task_config]
-# Shared joeblew999 task library — pinned to same tag as sibling repos (saasmail).
-includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.8.3"]
+# Shared joeblew999 task library — v0.9.0 brings bw:* (keychain↔NodeWarden hybrid).
+includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.9.0"]
 
 [tools]
 node                  = "lts"
 "npm:wrangler"        = "latest"
-"npm:@bitwarden/cli"  = "latest"   # bw — used by fnox bitwarden provider against this NodeWarden
+"npm:@bitwarden/cli"  = "latest"   # bw — used by shared bw:* tasks
 "github:jdx/fnox"     = "1.23"
 "aqua:cli/cli"        = "2"
 "aqua:jqlang/jq"      = "1"
@@ -109,84 +113,3 @@ wrangler secret list 2>/dev/null | grep -q '"name": "JWT_SECRET"' \
 [tasks."prove:all"]
 description = "Run all prove:* checks (deployed + bindings + secrets)."
 depends     = ["prove:deployed", "prove:bindings", "prove:secrets"]
-
-# ── Bitwarden CLI ↔ fnox integration ───────────────────────────────────────
-
-[tasks."bw:bootstrap"]
-description = "One-shot: configure bw CLI against this NodeWarden + log in via API key + unlock + write fnox keychain entries (BW_CLIENTID, BW_CLIENTSECRET, BW_SESSION) + register bitwarden provider in fnox global config. Three hidden-input prompts. Idempotent — re-run any time to refresh BW_SESSION."
-run         = "bash scripts/bw-bootstrap.sh"
-
-[tasks."bw:status"]
-description = "Show bw login status against NodeWarden (server URL, lock state, email)."
-run = '''
-BW_SESSION=$(fnox get BW_SESSION 2>/dev/null) bw status 2>&1 | jq -r '"  status:    \(.status)\n  serverUrl: \(.serverUrl)\n  userEmail: \(.userEmail // "?")"'
-'''
-
-[tasks."bw:unlock"]
-description = "Refresh BW_SESSION (vault auto-locks after inactivity). Prompts for master password, stores new session in fnox keychain."
-run = '''
-read -s -p "master password: " PW; echo
-export BW_PASSWORD="$PW"; unset PW
-NEW_SESSION=$(bw unlock --raw --passwordenv BW_PASSWORD)
-unset BW_PASSWORD
-[ -z "$NEW_SESSION" ] && { echo "✗ unlock failed"; exit 1; }
-printf '%s' "$NEW_SESSION" | fnox set --global -p keychain BW_SESSION
-unset NEW_SESSION
-echo "✓ BW_SESSION refreshed"
-'''
-
-[tasks."bw:migrate-from-keychain-dry"]
-description = "DRY RUN: preview which keychain secrets would be pushed to NodeWarden. Safe — no changes."
-run         = "bash scripts/bw-migrate.sh --dry-run"
-
-[tasks."bw:migrate-from-keychain"]
-description = "Push every keychain-backed fnox secret → matching NodeWarden item. Idempotent — safe to re-run. Skips BW_* (chicken/egg). Run -dry first."
-run         = "bash scripts/bw-migrate.sh"
-
-[tasks."bw:sync-dry"]
-description = "DRY RUN: preview which keychain entries would be updated from NodeWarden. Safe — no changes."
-run         = "bash scripts/bw-sync.sh --dry-run"
-
-[tasks."bw:sync"]
-description = "Pull all NodeWarden items → update keychain (idempotent). Run after rotating a secret on iPhone or web vault."
-run         = "bash scripts/bw-sync.sh"
-
-[tasks."bw:set"]
-description = "Write-through: hidden-input prompt → set NodeWarden item + mirror to keychain in one shot. Use to rotate a secret on Mac. Usage: mise run bw:set -- GITHUB_TOKEN"
-run         = "bash scripts/bw-set.sh"
-
-[tasks."bw:list"]
-description = "List item names + sizes in your NodeWarden vault. Values are NOT shown."
-run = '''
-export BW_SESSION=$(fnox get BW_SESSION)
-bw list items 2>/dev/null | jq -r '.[] | select(.type==1) | "  \(.name)\t\(.login.password // "" | length) bytes"' | sort
-'''
-
-[tasks."bw:diff"]
-description = "Show drift between keychain and NodeWarden — which keys are in each, which match (without revealing values)."
-run = '''
-export BW_SESSION=$(fnox get BW_SESSION)
-FNOX=/Users/apple/.local/share/mise/installs/github-jdx-fnox/1.23.0/fnox
-
-# All keychain-backed fnox secrets
-KC_KEYS=$(awk '/^\[secrets\]/{f=1; next} /^\[/{f=0} f && /^[A-Z_][A-Z0-9_]*[[:space:]]*=/{sub(/[[:space:]]*=.*/,""); print}' ~/.config/fnox/config.toml | sort -u)
-# All NodeWarden items
-BW_KEYS=$(bw list items 2>/dev/null | jq -r '.[] | select(.type==1) | .name' | sort -u)
-
-echo "Name                                    keychain  NodeWarden  match"
-echo "─────────────────────────────────────── ────────  ──────────  ─────"
-ALL=$(printf "%s\n%s" "$KC_KEYS" "$BW_KEYS" | sort -u)
-for k in $ALL; do
-  [ -z "$k" ] && continue
-  IN_KC=$(echo "$KC_KEYS" | grep -Fxq -- "$k" && echo "✓" || echo "·")
-  IN_BW=$(echo "$BW_KEYS" | grep -Fxq -- "$k" && echo "✓" || echo "·")
-  MATCH="—"
-  if [ "$IN_KC" = "✓" ] && [ "$IN_BW" = "✓" ]; then
-    # Strip trailing newlines — bw get password adds one, fnox get does not
-    KC_HASH=$("$FNOX" get "$k" 2>/dev/null | tr -d '\n' | shasum -a 256 | head -c 8)
-    BW_HASH=$(bw get password "$k" 2>/dev/null | tr -d '\n' | shasum -a 256 | head -c 8)
-    [ "$KC_HASH" = "$BW_HASH" ] && MATCH="✓" || MATCH="✗ DIFFER"
-  fi
-  printf "%-39s %-9s %-11s %s\n" "$k" "$IN_KC" "$IN_BW" "$MATCH"
-done
-'''
