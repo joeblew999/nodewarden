@@ -23,11 +23,12 @@
 includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.8.3"]
 
 [tools]
-node              = "lts"
-"npm:wrangler"    = "latest"
-"github:jdx/fnox" = "1.23"
-"aqua:cli/cli"    = "2"
-"aqua:jqlang/jq"  = "1"
+node                  = "lts"
+"npm:wrangler"        = "latest"
+"npm:@bitwarden/cli"  = "latest"   # bw — used by fnox bitwarden provider against this NodeWarden
+"github:jdx/fnox"     = "1.23"
+"aqua:cli/cli"        = "2"
+"aqua:jqlang/jq"      = "1"
 
 [env]
 DEFAULT_ENV    = "production"
@@ -108,3 +109,27 @@ wrangler secret list 2>/dev/null | grep -q '"name": "JWT_SECRET"' \
 [tasks."prove:all"]
 description = "Run all prove:* checks (deployed + bindings + secrets)."
 depends     = ["prove:deployed", "prove:bindings", "prove:secrets"]
+
+# ── Bitwarden CLI ↔ fnox integration ───────────────────────────────────────
+
+[tasks."bw:bootstrap"]
+description = "One-shot: configure bw CLI against this NodeWarden + log in via API key + unlock + write fnox keychain entries (BW_CLIENTID, BW_CLIENTSECRET, BW_SESSION) + register bitwarden provider in fnox global config. Three hidden-input prompts. Idempotent — re-run any time to refresh BW_SESSION."
+run         = "bash scripts/bw-bootstrap.sh"
+
+[tasks."bw:status"]
+description = "Show bw login status against NodeWarden (server URL, lock state, email)."
+run = '''
+BW_SESSION=$(fnox get BW_SESSION 2>/dev/null) bw status 2>&1 | jq -r '"  status:    \(.status)\n  serverUrl: \(.serverUrl)\n  userEmail: \(.userEmail // "?")"'
+'''
+
+[tasks."bw:unlock"]
+description = "Refresh BW_SESSION (vault auto-locks after inactivity). Prompts for master password, stores new session in fnox keychain."
+run = '''
+read -s -p "master password: " PW; echo
+NEW_SESSION=$(BW_PASSWORD="$PW" bw unlock --raw --passwordenv BW_PASSWORD)
+unset PW
+[ -z "$NEW_SESSION" ] && { echo "✗ unlock failed"; exit 1; }
+printf '%s' "$NEW_SESSION" | fnox set --global -p keychain BW_SESSION
+unset NEW_SESSION
+echo "✓ BW_SESSION refreshed"
+'''
