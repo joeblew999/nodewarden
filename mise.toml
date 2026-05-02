@@ -2,17 +2,19 @@
 #
 # Bitwarden-compatible self-hosted server (fork of shuaiplus/nodewarden).
 # Heavy lifting lives in the shared joeblew999/.github/mise-tasks library
-# (including the bw:* keychain↔NodeWarden hybrid sync tasks added in v0.9.0).
+# (full nu port at v0.10.0+ — bw:*, cf:*, secrets:*, prove:*, wrangler:*,
+# mobile:*, rust:*, fnox:init, env:resolve, release).
+#
 # This file only adds:
 #   - tools pin (incl. @bitwarden/cli for bw:* tasks)
 #   - phased deploy orchestrators (1-install, 6-build, 10-deploy)
-#   - d1:migrate + jwt:set bootstrap helpers
-#   - prove:* health checks specific to nodewarden
+#   - d1:migrate + jwt:set bootstrap helpers (nu)
+#   - prove:* health checks specific to nodewarden (nu)
 #
 # Deploy lifecycle (fresh machine):
 #   1. fnox set --global -p keychain CLOUDFLARE_API_TOKEN   # one-time per machine
 #      fnox set --global -p keychain CLOUDFLARE_ACCOUNT_ID
-#   2. mise install                                          # node + wrangler + bw + fnox
+#   2. mise install                                          # node + wrangler + bw + fnox + nu
 #   3. mise run 1-install                                    # npm deps
 #   4. mise run cf:provision-d1-r2                           # creates D1 + R2 (idempotent)
 #   5. mise run d1:migrate                                   # apply migrations/0001_init.sql
@@ -23,17 +25,17 @@
 #   10. mise run bw:migrate-from-keychain                    # push existing keychain → NodeWarden
 
 [task_config]
-# Shared joeblew999 task library — v0.9.0 brings bw:* (keychain↔NodeWarden hybrid).
+# Shared joeblew999 task library — v0.10.0 = full nu port.
 includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.10.0"]
 
 [tools]
-node                  = "lts"
-"npm:wrangler"        = "latest"
-"npm:@bitwarden/cli"  = "latest"   # bw — used by shared bw:* tasks
-"github:jdx/fnox"     = "1.23"
-"aqua:cli/cli"        = "2"
-"aqua:jqlang/jq"      = "1"
-"github:nushell/nushell" = "latest"   # nu — pilot: bash script alternatives
+node                     = "lts"
+"npm:wrangler"           = "latest"
+"npm:@bitwarden/cli"     = "latest"   # bw — used by shared bw:* tasks
+"github:jdx/fnox"        = "1.23"
+"github:nushell/nushell" = "0.112"    # nu — pinned (matches .github [tools]); used by shared mise-tasks + local prove:*
+"aqua:cli/cli"           = "2"
+"aqua:jqlang/jq"         = "1"
 
 [env]
 DEFAULT_ENV    = "production"
@@ -75,42 +77,50 @@ run         = "wrangler d1 execute nodewarden-db --remote --file migrations/0001
 
 [tasks."jwt:set"]
 description = "Generate a 64-char random JWT_SECRET, store in fnox keychain (NODEWARDEN_JWT_SECRET) AND push to wrangler as Worker secret. Idempotent: replaces both."
+shell = "nu -c"
 run = '''
-SECRET=$(openssl rand -base64 48)
-printf '%s' "$SECRET" | fnox set --global -p keychain NODEWARDEN_JWT_SECRET
-printf '%s' "$SECRET" | wrangler secret put JWT_SECRET
-unset SECRET
-echo "✓ JWT_SECRET stored in fnox + wrangler"
-echo "  Back up offline:  fnox get NODEWARDEN_JWT_SECRET | pbcopy  →  paste into iCloud Notes / paper"
+let secret = (^openssl rand -base64 48 | str trim)
+$secret | ^fnox set --global -p keychain NODEWARDEN_JWT_SECRET
+$secret | ^wrangler secret put JWT_SECRET
+print "✓ JWT_SECRET stored in fnox + wrangler"
+print "  Back up offline:  fnox get NODEWARDEN_JWT_SECRET | pbcopy  →  paste into iCloud Notes / paper"
 '''
 
-# ── Prove tasks (verify deployed state) ────────────────────────────────────
+# ── Nodewarden-specific prove tasks (nw: prefix to avoid collision with shared prove:*) ─
+# The shared library's prove:deployed / prove:bindings / prove:secrets are
+# scoped to CF Access deployments (auth-service / kv-manager pattern).
+# Nodewarden has no CF Access — it gates with Bitwarden's own auth — so
+# we need different probes here under a distinct namespace.
 
-[tasks."prove:deployed"]
-description = "HTTP smoke test: GET /alive on the deployed Worker."
+[tasks."nw:url"]
+description = "HTTP smoke test: GET /alive on the deployed NodeWarden. Hardcoded URL — no wrangler auth needed."
+shell = "nu -c"
 run = '''
-URL=$(wrangler deployments list --json 2>/dev/null | jq -r '.[0].url' 2>/dev/null || echo "")
-[ -z "$URL" ] && URL="https://nodewarden.gedw99.workers.dev"
-echo "→ $URL/alive"
-CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/alive")
-[ "$CODE" = "200" ] && echo "  ✓ HTTP 200" || { echo "  ✗ HTTP $CODE"; exit 1; }
+let url = "https://nodewarden.gedw99.workers.dev"
+print $"→ ($url)/alive"
+let code = (^curl -sS -o /dev/null -w '%{http_code}' $"($url)/alive" | str trim)
+if $code == "200" {
+  print "  ✓ HTTP 200"
+} else {
+  print --stderr $"  ✗ HTTP ($code)"
+  exit 1
+}
 '''
 
-[tasks."prove:bindings"]
-description = "Confirm wrangler sees D1, R2, and DurableObject bindings on the deployed Worker."
+[tasks."nw:jwt"]
+description = "Confirm JWT_SECRET is set on the NodeWarden Worker (NW-specific — different from shared prove:secrets which checks 4 CF-Access secrets)."
+shell = "nu -c"
 run = '''
-wrangler deployments list --json 2>/dev/null | jq -r '.[0].bindings[] | "  ✓ \(.type)\t\(.name // .binding)"' \
-  || echo "✗ no deployment found — run mise run 10-deploy"
+$env.CLOUDFLARE_API_TOKEN = (^fnox get CLOUDFLARE_API_TOKEN | str trim)
+let listing = (^wrangler secret list | complete | get stdout)
+if ($listing | str contains '"name": "JWT_SECRET"') {
+  print "  ✓ JWT_SECRET set on Worker"
+} else {
+  print --stderr "  ✗ JWT_SECRET missing — run mise run jwt:set"
+  exit 1
+}
 '''
 
-[tasks."prove:secrets"]
-description = "Confirm JWT_SECRET is set on the Worker."
-run = '''
-wrangler secret list 2>/dev/null | grep -q '"name": "JWT_SECRET"' \
-  && echo "  ✓ JWT_SECRET set on Worker" \
-  || { echo "  ✗ JWT_SECRET missing — run mise run jwt:set"; exit 1; }
-'''
-
-[tasks."prove:all"]
-description = "Run all prove:* checks (deployed + bindings + secrets)."
-depends     = ["prove:deployed", "prove:bindings", "prove:secrets"]
+[tasks."nw:all"]
+description = "Run NodeWarden health checks: HTTP /alive + JWT_SECRET set + bindings (delegates to shared prove:bindings for the wrangler dry-run)."
+depends     = ["nw:url", "nw:jwt", "prove:bindings"]
