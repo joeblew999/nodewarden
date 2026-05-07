@@ -25,17 +25,36 @@
 #   10. mise run bw:migrate-from-keychain                    # push existing keychain → NodeWarden
 
 [task_config]
-# Shared joeblew999 task library — v0.10.0 = full nu port.
-includes = ["git::https://github.com/joeblew999/.github.git//mise-tasks?ref=v0.10.0"]
+# Migrated to v0.17.3 TOML-task includes. Per-task tools propagate;
+# consumer no longer pins gh+jq just because shared tasks use them.
+# bw (npm:@bitwarden/cli) stays pinned here because nodewarden's local
+# tasks may invoke ^bw directly (jwt:set, etc) — and bw's wrapper needs
+# node which is already pinned anyway.
+#
+# Browseable (clicking the `git::` URL will 404):
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/bw.toml
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/cf.toml
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/env.toml
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/fnox.toml
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/prove.toml
+#   https://github.com/joeblew999/.github/blob/v0.17.3/tasks/wrangler.toml
+includes = [
+  "git::https://github.com/joeblew999/.github.git//tasks/bw.toml?ref=v0.17.3",
+  "git::https://github.com/joeblew999/.github.git//tasks/cf.toml?ref=v0.17.3",
+  "git::https://github.com/joeblew999/.github.git//tasks/env.toml?ref=v0.17.3",
+  "git::https://github.com/joeblew999/.github.git//tasks/fnox.toml?ref=v0.17.3",
+  "git::https://github.com/joeblew999/.github.git//tasks/prove.toml?ref=v0.17.3",
+  "git::https://github.com/joeblew999/.github.git//tasks/wrangler.toml?ref=v0.17.3",
+]
 
 [tools]
 node                     = "lts"
 "npm:wrangler"           = "latest"
-"npm:@bitwarden/cli"     = "latest"   # bw — used by shared bw:* tasks
-"github:jdx/fnox"        = "1.23"
-"github:nushell/nushell" = "0.112"    # nu — pinned (matches .github [tools]); used by shared mise-tasks + local prove:*
-"aqua:cli/cli"           = "2"
-"aqua:jqlang/jq"         = "1"
+"npm:@bitwarden/cli"     = "latest"   # bw — used by both shared bw:* tasks and nodewarden's local tasks
+"github:jdx/fnox"        = "1.24"
+"github:nushell/nushell" = "0.112"
+# Shared-lib tasks (cf:*, prove:*, secrets:*) bring their own gh + jq
+# via per-task `tools = { ... }`.
 
 [env]
 DEFAULT_ENV    = "production"
