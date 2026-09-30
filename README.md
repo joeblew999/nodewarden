@@ -159,3 +159,8 @@ LGPL-3.0 License
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left)](https://www.star-history.com/#shuaiplus/NodeWarden&type=timeline&legend=top-left)
+
+## Mise workflow retirement
+
+The former shared mise automation is retired. See [MISE-RETIREMENT.md](MISE-RETIREMENT.md)
+for removed commands and CI workflows; `mise.toml` contains the remaining local tasks.

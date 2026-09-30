@@ -1,72 +1,17 @@
-[settings]
-# extends task-inheritance is mise experimental — joeblew999/.github
-# v0.18+ uses it for per-namespace tools dedup (cf:_base, bw:_base, etc).
-experimental = true
-
-# nodewarden — operator deploy tooling.
-#
-# Bitwarden-compatible self-hosted server (fork of shuaiplus/nodewarden).
-# Heavy lifting lives in the shared joeblew999/.github/mise-tasks library
-# (full nu port at v0.10.0+ — bw:*, cf:*, secrets:*, prove:*, wrangler:*,
-# mobile:*, rust:*, fnox:init, env:resolve, release).
-#
-# This file only adds:
-#   - tools pin (incl. @bitwarden/cli for bw:* tasks)
-#   - phased deploy orchestrators (1-install, 6-build, 10-deploy)
-#   - d1:migrate + jwt:set bootstrap helpers (nu)
-#   - prove:* health checks specific to nodewarden (nu)
-#
-# Deploy lifecycle (fresh machine):
-#   1. fnox set --global -p keychain CLOUDFLARE_API_TOKEN   # one-time per machine
-#      fnox set --global -p keychain CLOUDFLARE_ACCOUNT_ID
-#   2. mise install                                          # node + wrangler + bw + fnox + nu
-#   3. mise run 1-install                                    # npm deps
-#   4. mise run cf:provision-d1-r2                           # creates D1 + R2 (idempotent)
-#   5. mise run d1:migrate                                   # apply migrations/0001_init.sql
-#   6. mise run jwt:set                                      # generate + push JWT_SECRET
-#   7. mise run 10-deploy                                    # build + deploy
-#   8. (manual) open URL → register account → generate API key in Settings
-#   9. mise run bw:bootstrap                                 # wire bw CLI ↔ fnox (3 hidden prompts)
-#   10. mise run bw:migrate-from-keychain                    # push existing keychain → NodeWarden
-
-[task_config]
-# Migrated to v0.17.3 TOML-task includes. Per-task tools propagate;
-# consumer no longer pins gh+jq just because shared tasks use them.
-# bw (npm:@bitwarden/cli) stays pinned here because nodewarden's local
-# tasks may invoke ^bw directly (jwt:set, etc) — and bw's wrapper needs
-# node which is already pinned anyway.
-#
-# Browseable (clicking the `git::` URL will 404):
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/bw.toml
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/cf.toml
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/env.toml
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/fnox.toml
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/prove.toml
-#   https://github.com/joeblew999/.github/blob/v0.19.1/tasks/wrangler.toml
-includes = [
-  "git::https://github.com/joeblew999/.github.git//tasks/ci.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/bw.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/cf.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/env.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/fnox.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/prove.toml?ref=v0.33.0",
-  "git::https://github.com/joeblew999/.github.git//tasks/wrangler.toml?ref=v0.33.0",
-]
+# Repository-local tooling. Shared workflows are retired; see MISE-RETIREMENT.md.
 
 [tools]
 node                     = "lts"
 "npm:wrangler"           = "latest"
-"npm:@bitwarden/cli"     = "latest"   # bw — used by both shared bw:* tasks and nodewarden's local tasks
+"npm:@bitwarden/cli"     = "latest"   # Bitwarden client
 "github:jdx/fnox"        = "1.24"
 "github:nushell/nushell" = "0.112"
-# Shared-lib tasks (cf:*, prove:*, secrets:*) bring their own gh + jq
-# via per-task `tools = { ... }`.
 
 [env]
 DEFAULT_ENV    = "production"
 FNOX_SYNC_KEYS = ""        # nothing to sync to GHA — Worker secret managed via wrangler
 
-# ── Per-fork inline tasks (everything else comes from shared) ──────────────
+# Repository-local tasks.
 
 [tasks."1-install"]
 description = "Install npm deps (first time)."
@@ -76,11 +21,6 @@ run         = "npm install"
 description = "Build the Vite SPA web vault (dist/)."
 depends     = ["1-install"]
 run         = "npm run build"
-
-[tasks."10-deploy"]
-description = "Build + deploy the Worker. Validates CF token first."
-depends     = ["cf:token-check", "6-build"]
-run         = "wrangler deploy"
 
 [tasks."10b-redeploy"]
 description = "Re-deploy without rebuilding (fast iteration after wrangler.toml/secret changes)."
@@ -111,11 +51,7 @@ print "✓ JWT_SECRET stored in fnox + wrangler"
 print "  Back up offline:  fnox get NODEWARDEN_JWT_SECRET | pbcopy  →  paste into iCloud Notes / paper"
 '''
 
-# ── Nodewarden-specific prove tasks (nw: prefix to avoid collision with shared prove:*) ─
-# The shared library's prove:deployed / prove:bindings / prove:secrets are
-# scoped to CF Access deployments (auth-service / kv-manager pattern).
-# Nodewarden has no CF Access — it gates with Bitwarden's own auth — so
-# we need different probes here under a distinct namespace.
+# Nodewarden health probes.
 
 [tasks."nw:url"]
 description = "HTTP smoke test: GET /alive on the deployed NodeWarden. Hardcoded URL — no wrangler auth needed."
@@ -133,7 +69,7 @@ if $code == "200" {
 '''
 
 [tasks."nw:jwt"]
-description = "Confirm JWT_SECRET is set on the NodeWarden Worker (NW-specific — different from shared prove:secrets which checks 4 CF-Access secrets)."
+description = "Confirm JWT_SECRET is set on the NodeWarden Worker."
 shell = "nu -c"
 run = '''
 $env.CLOUDFLARE_API_TOKEN = (^fnox get CLOUDFLARE_API_TOKEN | str trim)
@@ -145,19 +81,3 @@ if ($listing | str contains '"name": "JWT_SECRET"') {
   exit 1
 }
 '''
-
-[tasks."nw:all"]
-description = "Run NodeWarden health checks: HTTP /alive + JWT_SECRET set + bindings (delegates to shared prove:bindings for the wrangler dry-run)."
-depends     = ["nw:url", "nw:jwt", "prove:bindings"]
-
-# ── check ────────────────────────────────────────────────────────────────────
-# Local lint canary — run before every push.
-#   ci:parse-check           parse-checks any nu files in mise-tasks/
-#   ci:check-toml-tasks      parse-checks inline run bodies in tasks/*.toml
-#   ci:check-workflow-nu     parse-checks embedded nu blocks in .github/workflows/*.yml
-# All three are no-ops in repos lacking those files. Adds <2s
-# overhead, catches nu syntax errors locally instead of in CI.
-[tasks.check]
-description = "Local lint: parse-check every nu file + TOML-task body + workflow nu block"
-depends = ["ci:parse-check", "ci:check-toml-tasks", "ci:check-workflow-nu"]
-run = "echo \"✓ check passed\""
